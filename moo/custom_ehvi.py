@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from botorch.acquisition.multi_objective import qExpectedHypervolumeImprovement
+from botorch.acquisition.multi_objective import qNoisyExpectedHypervolumeImprovement
 from botorch.acquisition.multi_objective.objective import MCMultiOutputObjective
 from botorch.models.model import Model
 from botorch.sampling.base import MCSampler
@@ -13,34 +13,50 @@ from botorch.utils.multi_objective.box_decompositions.non_dominated import (
 from botorch.utils.transforms import (
     concatenate_pending_points,
     t_batch_mode_transform,
+    match_batch_shape,
+    is_ensemble
 )
 from botorch.utils.objective import compute_smoothed_feasibility_indicator
 
 
-class CustomEHVI(qExpectedHypervolumeImprovement):
+class CustomEHVI(qNoisyExpectedHypervolumeImprovement):
     def __init__(
         self,
         model: Model,
         ref_point: list[float] | Tensor,
-        partitioning: NondominatedPartitioning,
+        X_baseline: Tensor,
         sampler: MCSampler | None = None,
         objective: MCMultiOutputObjective | None = None,
         constraints: list[Callable[[Tensor], Tensor]] | None = None,
         X_pending: Tensor | None = None,
         eta: Tensor | float = 1e-3,
         fat: bool = False,
-        beta: float | Tensor = 1.0,
-    ):
+        prune_baseline: bool = False,
+        alpha: float = 0.0,
+        cache_pending: bool = True,
+        max_iep: int = 0,
+        incremental_nehvi: bool = True,
+        cache_root: bool = True,
+        marginalize_dim: int | None = None,
+        beta: float = 20.0,
+    ) -> None:
         super().__init__(
-            model=model, 
+            model=model,
             ref_point=ref_point,
-            partitioning=partitioning,
+            X_baseline=X_baseline,
             sampler=sampler,
             objective=objective,
             constraints=constraints,
             X_pending=X_pending,
             eta=eta,
             fat=fat,
+            prune_baseline=prune_baseline,
+            alpha=alpha,
+            cache_pending=cache_pending,
+            max_iep=max_iep,
+            incremental_nehvi=incremental_nehvi,
+            cache_root=cache_root,
+            marginalize_dim=marginalize_dim,
         )
         self.register_buffer("beta", torch.as_tensor(beta))
             
@@ -143,15 +159,37 @@ class CustomEHVI(qExpectedHypervolumeImprovement):
             improvement for each batch.
         """
         # compute the sampled ehvi
-        sampled_hvi = self._compute_sampled_ehvi(samples=samples, X=X)
+        sampled_hvi = self._compute_sampled_hvi(samples=samples, X=X)
         ehvi = sampled_hvi.mean(dim=0)
         varhvi = sampled_hvi.var(dim=0)
+        # print(f"ehvi: {ehvi}, varhvi: {varhvi}")
         # compute the expected improvement
         return ehvi + self.beta * varhvi.sqrt()
     
     @concatenate_pending_points
     @t_batch_mode_transform()
     def forward(self, X: Tensor) -> Tensor:
-        posterior = self.model.posterior(X)
-        samples = self.get_posterior_samples(posterior)
-        return self._compute_qehviucb(samples=samples, X=X)
+        X_full = torch.cat([match_batch_shape(self.X_baseline, X), X], dim=-2)
+        # NOTE: To ensure that we correctly sample `f(X)` from the joint distribution
+        # `f((X_baseline, X)) ~ P(f | D)`, it is critical to compute the joint posterior
+        # over X *and* X_baseline -- which also contains pending points whenever there
+        # are any --  since the baseline and pending values `f(X_baseline)` are
+        # generally pre-computed and cached before the `forward` call, see the docs of
+        # `cache_pending` for details.
+        # TODO: Improve the efficiency by not re-computing the X_baseline-X_baseline
+        # covariance matrix, but only the covariance of
+        # 1) X and X, and
+        # 2) X and X_baseline.
+        posterior = self.model.posterior(X_full)
+        # Account for possible one-to-many transform and the MCMC batch dimension in
+        # `SaasFullyBayesianSingleTaskGP`
+        event_shape_lag = 1 if is_ensemble(self.model) else 2
+        n_w = (
+            posterior._extended_shape()[X_full.dim() - event_shape_lag]
+            // X_full.shape[-2]
+        )
+        q_in = X.shape[-2] * n_w
+        self._set_sampler(q_in=q_in, posterior=posterior)
+        samples = self._get_f_X_samples(posterior=posterior, q_in=q_in)
+        # Add previous nehvi from pending points.
+        return self._compute_qehviucb(samples=samples, X=X) + self._prev_nehvi

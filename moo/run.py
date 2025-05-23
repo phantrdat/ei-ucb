@@ -1,68 +1,52 @@
 import torch
 import os
-from botorch.test_functions.multi_objective import *
 from botorch.models import SingleTaskGP
 from botorch.models.model_list_gp_regression import ModelListGP
 from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
 from botorch.fit import fit_gpytorch_mll
-from botorch.acquisition.monte_carlo import (
-    qExpectedHypervolumeImprovement, 
-    ExpectedHypervolumeImprovement
+from botorch.acquisition.multi_objective.analytic import ExpectedHypervolumeImprovement
+from botorch.acquisition.multi_objective.monte_carlo import (
+    qExpectedHypervolumeImprovement,
+    qNoisyExpectedHypervolumeImprovement
 )
 from botorch.acquisition.multi_objective.logei import (
-    qLogExpectedHypervolumeImprovement
+    qLogExpectedHypervolumeImprovement,
+    qLogNoisyExpectedHypervolumeImprovement
 )
 from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.utils.multi_objective.box_decompositions.dominated import (
     DominatedPartitioning,
 )
-
-from custom_ehvi import CustomEHVI
-
+from botorch.utils.multi_objective.box_decompositions.non_dominated import (
+    FastNondominatedPartitioning,
+)
 from botorch.optim import optimize_acqf
-import matplotlib.pyplot as plt
 from botorch.models.transforms.outcome import Standardize
+import matplotlib.pyplot as plt
 from torch.quasirandom import SobolEngine
 # Set device (use GPU if available)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.double  # Use double precision for GP models
+from tqdm import tqdm
 import numpy as np
 
 import warnings
 warnings.filterwarnings("ignore")
 
-# Define list function tests
-OBJECTIVE_FUNCTIONS = [
-    BraninCurrin(),
-    DH1(dim=5),
-    DH2(dim=5),
-    DH3(dim=5),
-    DH4(dim=5),
-    DTLZ1(dim=6, n_objectives=2),
-    DTLZ2(dim=6, n_objectives=2),
-    DTLZ3(dim=6, n_objectives=2),
-    DTLZ4(dim=6, n_objectives=2),
-    DTLZ5(dim=6, n_objectives=2),
-    DTLZ7(dim=6, n_objectives=2),
-    Penicillin(),
-    VehicleSafety(),
-    ZDT1(dim=5),
-    ZDT2(dim=5),
-    ZDT3(dim=5),
-    CarSideImpact(),
-]
+import gpytorch
+MAX_CHOLESKY_SIZE = float('inf')
 
-N = 10  # Number of runs per acquisition function
-BETA=20
-MC_SAMPLES = 128  # Number of Monte Carlo samples for acquisition function
+from custom_ehvi import CustomEHVI
+from constants import *
+
 for f in OBJECTIVE_FUNCTIONS:
-    dim = f.dim
-    objective_func = f().to(dtype=dtype, device=device)
+    objective_func = f(**FUNCTION_ARGS[f]).to(dtype=dtype, device=device)
+    dim = objective_func.dim
     
     bounds = torch.tensor(objective_func.bounds, dtype=dtype, device=device)  # Search space bounds
     # Experiment settings
     
-    num_initial_points = dim + 1
+    num_initial_points = 2*dim + 1
     num_iterations = 5 if dim <= 10 else 10
     # Generate initial training data
     sobol = SobolEngine(dimension=dim, scramble=True, seed=0)
@@ -70,54 +54,67 @@ for f in OBJECTIVE_FUNCTIONS:
     fixed_train_Y  = objective_func(fixed_train_X) # Evaluate function
     def bayesian_optimization(acq_type):
         best_values_runs = []
+        ref_point = objective_func.ref_point
         for run in range(N):
-            print(objective_func.__class__.__name__, acq_type, run)
+            print(f"Run {run+1}")
+            print(objective_func.__class__.__name__, acq_type, run+1)
             train_X = fixed_train_X.clone()
             train_Y = fixed_train_Y.clone()
             # Track best observed function values
             best_values = [train_Y.min().item()]
             gp = []
-            for _ in range(train_Y.shape[-1]):
+            for obj_idx in range(train_Y.shape[-1]):
+                train_y = train_Y[..., obj_idx].unsqueeze(-1)
+                train_yvar = torch.full_like(train_y, (1.01**train_y.shape[0]) * (NOISE_SE**2))
                 gp.append(
                     SingleTaskGP(
                         train_X, 
-                        train_Y, 
+                        train_y, 
+                        train_yvar,
                         outcome_transform=Standardize(m=1)
                     )
                 )
             gp = ModelListGP(*gp)
             mll = SumMarginalLogLikelihood(gp.likelihood, gp)
-            fit_gpytorch_mll(mll)
-            for _ in range(num_iterations):
-                # Multi-objective acquisition function using hypervolume improvement
-                sampler = SobolQMCNormalSampler(num_samples=MC_SAMPLES)
+            with gpytorch.settings.max_cholesky_size(MAX_CHOLESKY_SIZE):
+                fit_gpytorch_mll(mll)
+            gp.eval()
+            for _ in tqdm(range(num_iterations)):
+                sampler = SobolQMCNormalSampler(sample_shape=torch.Size([MC_SAMPLES]))
+                with torch.no_grad():
+                    pred = gp.posterior(train_X).mean
+                partitioning = FastNondominatedPartitioning(
+                    ref_point=objective_func.ref_point,
+                    Y=pred,
+                )
                 if acq_type == "EHVI":
                     acq_func = ExpectedHypervolumeImprovement(
                         model=gp,
-                        ref_point=f.ref_point.tolist(),
-                        partitioning=None,  # Let BoTorch handle partitioning
-                        sampler=sampler,
+                        ref_point=ref_point.tolist(),
+                        partitioning=partitioning, 
                     )
                 elif acq_type == "qEHVI":
-                    sampler = SobolQMCNormalSampler(num_samples=MC_SAMPLES)
-                    acq_func = qExpectedHypervolumeImprovement(
+                    acq_func = qNoisyExpectedHypervolumeImprovement(
                         model=gp,
-                        ref_point=f.ref_point.tolist(),
-                        partitioning=None,  # Let BoTorch handle partitioning
+                        ref_point=ref_point.tolist(),
+                        X_baseline=train_X,
+                        prune_baseline=True,
                         sampler=sampler,
                     )
                 elif acq_type == "qLogEHVI":
-                    acq_func = qLogExpectedHypervolumeImprovement(
+                    acq_func = qLogNoisyExpectedHypervolumeImprovement(
                         model=gp,
-                        ref_point=f.ref_point.tolist(),
-                        partitioning=None,  # Let BoTorch handle partitioning
+                        ref_point=ref_point.tolist(),
+                        X_baseline=train_X,
+                        prune_baseline=True,
                         sampler=sampler,
                     )
                 elif acq_type == "EHVI-Custom":
                     acq_func = CustomEHVI(
                         model=gp,
-                        ref_point=f.ref_point.tolist(),
-                        partitioning=None,  # Let BoTorch handle partitioning
+                        ref_point=ref_point.tolist(),
+                        X_baseline=train_X,
+                        prune_baseline=True, 
                         sampler=sampler,
                         beta=BETA,
                     )
@@ -125,7 +122,16 @@ for f in OBJECTIVE_FUNCTIONS:
                     raise ValueError("Invalid acquisition function type")
                 # Optimize the acquisition function to find the next query point
                 candidate, _ = optimize_acqf(
-                    acq_func, bounds=bounds, q=1, num_restarts=10, raw_samples=100
+                    acq_func, 
+                    bounds=bounds, 
+                    q=1, 
+                    num_restarts=20, 
+                    raw_samples=512,
+                    options={
+                        "batch_limit": 5,
+                        "maxiter": 100
+                    },
+                    sequential=True
                 )
                 # Evaluate the function at the new point
                 new_Y = objective_func(candidate)
@@ -133,20 +139,31 @@ for f in OBJECTIVE_FUNCTIONS:
                 train_X = torch.cat([train_X, candidate])
                 train_Y = torch.cat([train_Y, new_Y])
                 # Record hypervolume
-                bd = DominatedPartitioning(ref_point=f.ref_point, Y=train_Y)
+                bd = DominatedPartitioning(ref_point=ref_point, Y=train_Y)
                 volume = bd.compute_hypervolume().item()
                 best_values.append(volume)
                 # print(f"Iteration {i+1}: Best Y = {train_Y.min().item():.4f}")
             best_values_runs.append(best_values)
         return np.array(best_values_runs)
     
-        
-    best_value_ehvi = bayesian_optimization("EHVI")
-    best_values_qehvi = bayesian_optimization("qEHVI")
-    best_values_qLogehvi = bayesian_optimization("qLogEHVI")
-    for beta in [1,5,10,15, 20, 25, 30, 35, 40]:
+    # Extract function name dynamically
+    func_name = objective_func.__class__.__name__
+    if not os.path.exists(f"{NUMERICAL_RESULTS_DIR}/{func_name}"):
+        os.makedirs(f"{NUMERICAL_RESULTS_DIR}/{func_name}")
+    # print(f"Running Bayesian Optimization for {func_name} with {dim} dimensions and {objective_func.num_objectives} objectives")
+    # print("Running EHVI")
+    # best_value_ehvi = bayesian_optimization("EHVI")
+    # np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_ehvi.npy", best_value_ehvi)
+    # print("Running qEHVI")
+    # best_values_qehvi = bayesian_optimization("qEHVI")
+    # np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_logehvi.npy", best_values_qehvi)
+    # print("Running qLogEHVI")
+    # best_values_qLogehvi = bayesian_optimization("qLogEHVI")
+    # np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_qlogehvi.npy", best_values_qLogehvi)
+
+    for beta in [1, 5, 10, 15, 20, 25, 30, 35, 40]:
         BETA = beta
-        
+        print(f"Running EHVI-Custom with beta={BETA}")
         best_values_ehvi_custom = bayesian_optimization("EHVI-Custom")
         
         # Compute mean and standard deviation
@@ -205,11 +222,9 @@ for f in OBJECTIVE_FUNCTIONS:
         
         plt.xlabel("Iteration")
         plt.ylabel("Best HV")
-        # Extract function name dynamically
-        func_name = objective_func.__class__.__name__
-        plt.title(f"BO with EHVI vs. EHVI-Custom on {func_name}-{dim}D-{f.num_objectives} objectives")
+        plt.title(f"BO with EHVI vs. EHVI-Custom on {func_name}-{dim}D-{f.num_objectives}objectives")
         plt.legend()
         plt.grid(True)
-        if os.path.isdir(f"results/{func_name}") == False:
-            os.makedirs(f"results/{func_name}")
-        plt.savefig(f"results/{func_name}/{func_name}-{dim}-{f.num_objectives}-beta={BETA}.pdf", dpi=300)  # Save plot as PDF
+        if os.path.isdir(f"{FIG_DIR}/{func_name}") == False:
+            os.makedirs(f"{FIG_DIR}/{func_name}")
+        plt.savefig(f"{FIG_DIR}/{func_name}/{func_name}-{dim}-{f.num_objectives}-beta={BETA}.pdf", dpi=300)  # Save plot as PDF
