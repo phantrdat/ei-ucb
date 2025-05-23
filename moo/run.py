@@ -13,6 +13,9 @@ from botorch.acquisition.multi_objective.logei import (
     qLogExpectedHypervolumeImprovement
 )
 from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.utils.multi_objective.box_decompositions.dominated import (
+    DominatedPartitioning,
+)
 
 from custom_ehvi import CustomEHVI
 
@@ -47,7 +50,7 @@ OBJECTIVE_FUNCTIONS = [
     ZDT2(dim=5),
     ZDT3(dim=5),
     CarSideImpact(),
-    ]
+]
 
 N = 10  # Number of runs per acquisition function
 BETA=20
@@ -60,7 +63,7 @@ for f in OBJECTIVE_FUNCTIONS:
     # Experiment settings
     
     num_initial_points = dim + 1
-    num_iterations = 100 if dim <= 10 else 200
+    num_iterations = 5 if dim <= 10 else 10
     # Generate initial training data
     sobol = SobolEngine(dimension=dim, scramble=True, seed=0)
     fixed_train_X  = bounds[0] + (bounds[1] - bounds[0]) * sobol.draw(num_initial_points).to(dtype=dtype, device=device)
@@ -111,8 +114,13 @@ for f in OBJECTIVE_FUNCTIONS:
                         sampler=sampler,
                     )
                 elif acq_type == "EHVI-Custom":
-                    # beta = 10  # Exploration parameter for EI Custom
-                    acq_func = CustomEHVI(model=gp, best_f=train_Y.min(), beta=BETA, maximize=False)
+                    acq_func = CustomEHVI(
+                        model=gp,
+                        ref_point=f.ref_point.tolist(),
+                        partitioning=None,  # Let BoTorch handle partitioning
+                        sampler=sampler,
+                        beta=BETA,
+                    )
                 else:
                     raise ValueError("Invalid acquisition function type")
                 # Optimize the acquisition function to find the next query point
@@ -124,49 +132,84 @@ for f in OBJECTIVE_FUNCTIONS:
                 # Update the dataset
                 train_X = torch.cat([train_X, candidate])
                 train_Y = torch.cat([train_Y, new_Y])
-                # Store best observed value
-                best_values.append(train_Y.min().item())
+                # Record hypervolume
+                bd = DominatedPartitioning(ref_point=f.ref_point, Y=train_Y)
+                volume = bd.compute_hypervolume().item()
+                best_values.append(volume)
                 # print(f"Iteration {i+1}: Best Y = {train_Y.min().item():.4f}")
             best_values_runs.append(best_values)
         return np.array(best_values_runs)
     
         
-    
-    best_values_ei = bayesian_optimization("EI")
-    best_values_logei = bayesian_optimization("LogEI")
+    best_value_ehvi = bayesian_optimization("EHVI")
+    best_values_qehvi = bayesian_optimization("qEHVI")
+    best_values_qLogehvi = bayesian_optimization("qLogEHVI")
     for beta in [1,5,10,15, 20, 25, 30, 35, 40]:
         BETA = beta
         
-        best_values_ei_custom = bayesian_optimization("EI-Custom")
+        best_values_ehvi_custom = bayesian_optimization("EHVI-Custom")
         
         # Compute mean and standard deviation
-        mean_ei = best_values_ei.mean(axis=0)
-        std_ei = best_values_ei.std(axis=0)
-        mean_logei = best_values_logei.mean(axis=0)
-        std_logei = best_values_logei.std(axis=0)
-        mean_ei_custom = best_values_ei_custom.mean(axis=0)
-        std_ei_custom = best_values_ei_custom.std(axis=0)
+        mean_ehvi = best_value_ehvi.mean(axis=0)
+        std_ehvi = best_value_ehvi.std(axis=0)
+        mean_qehvi = best_values_qehvi.mean(axis=0)
+        std_qehvi = best_values_qehvi.std(axis=0)
+        mean_qLogehvi = best_values_qLogehvi.mean(axis=0)
+        std_qLogehvi = best_values_qLogehvi.std(axis=0)
+        mean_ehvi_custom = best_values_ehvi_custom.mean(axis=0)
+        std_ehvi_custom = best_values_ehvi_custom.std(axis=0)
         # Plot results
-        iterations = np.arange(len(mean_ei))
+        iterations = np.arange(len(mean_ehvi))
         plt.figure(figsize=(8, 5))
         
-        plt.plot(iterations, mean_ei, marker="o", linestyle="-", color="b", label="EI")
-        plt.fill_between(iterations, mean_ei - std_ei, mean_ei + std_ei, color="b", alpha=0.2)
+        plt.plot(iterations, mean_ehvi, marker="o", linestyle="-", color="b", label="EHVI")
+        plt.fill_between(
+            iterations, 
+            mean_ehvi - std_ehvi, 
+            mean_ehvi + std_ehvi, 
+            color="b", alpha=0.2
+        )
         
-        plt.plot(iterations, mean_logei, marker="x", linestyle="-", color="g", label="LogEI")  # Fixed variable
-        plt.fill_between(iterations, mean_logei - std_logei, mean_logei + std_logei, color="g", alpha=0.2)  # Fixed color
+        plt.plot(iterations, mean_qehvi, marker="x", linestyle="-", color="g", label="qEHVI")  # Fixed variable
+        plt.fill_between(
+            iterations, 
+            mean_qehvi - std_qehvi, 
+            mean_qehvi + std_qehvi, 
+            color="g", alpha=0.2
+        )  # Fixed color
         
+        plt.plot(
+            iterations, mean_qLogehvi, marker="^", linestyle="-", color="m", label="qLogEHVI"
+        )
+        plt.fill_between(
+            iterations, 
+            mean_qLogehvi - std_qLogehvi, 
+            mean_qLogehvi + std_qLogehvi, 
+            color="m", alpha=0.2
+        )
         
-        plt.plot(iterations, mean_ei_custom, marker="s", linestyle="-", color="r", label=f"EI Custom, Beta={BETA}")
-        plt.fill_between(iterations, mean_ei_custom - std_ei_custom, mean_ei_custom + std_ei_custom, color="r", alpha=0.2)
+        plt.plot(
+            iterations, 
+            mean_ehvi_custom, 
+            marker="s", 
+            linestyle="-", 
+            color="r", 
+            label=f"EHVI Custom, Beta={BETA}"
+        )
+        plt.fill_between(
+            iterations, 
+            mean_ehvi_custom - std_ehvi_custom, 
+            mean_ehvi_custom + std_ehvi_custom, 
+            color="r", alpha=0.2
+        )
         
         plt.xlabel("Iteration")
-        plt.ylabel("Best Function Value Found")
+        plt.ylabel("Best HV")
         # Extract function name dynamically
         func_name = objective_func.__class__.__name__
-        plt.title(f"BO with EI vs. EI-Custom on {func_name}-{dim}D")
+        plt.title(f"BO with EHVI vs. EHVI-Custom on {func_name}-{dim}D-{f.num_objectives} objectives")
         plt.legend()
         plt.grid(True)
         if os.path.isdir(f"results/{func_name}") == False:
             os.makedirs(f"results/{func_name}")
-        plt.savefig(f"results/{func_name}/{func_name}-{dim}-beta={BETA}.pdf", dpi=300)  # Save plot as PDF
+        plt.savefig(f"results/{func_name}/{func_name}-{dim}-{f.num_objectives}-beta={BETA}.pdf", dpi=300)  # Save plot as PDF
