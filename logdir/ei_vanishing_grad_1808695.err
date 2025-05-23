@@ -1,0 +1,18 @@
+  0%|          | 0/150 [00:00<?, ?it/s]  0%|          | 0/150 [00:09<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/pdat/EI-UCB/vanishing_grad_ei.py", line 103, in <module>
+    best_values, vanish = bayesian_optimization(kernel_type)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/pdat/EI-UCB/vanishing_grad_ei.py", line 85, in bayesian_optimization
+    frac = fraction_vanishing_ei_gradient(acq_func, bounds,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/pdat/EI-UCB/vanishing_grad_ei.py", line 39, in fraction_vanishing_ei_gradient
+    grad_i = torch.autograd.grad(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/home/pdat/.conda/envs/BO_env/lib/python3.11/site-packages/torch/autograd/__init__.py", line 496, in grad
+    result = _engine_run_backward(
+             ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/pdat/.conda/envs/BO_env/lib/python3.11/site-packages/torch/autograd/graph.py", line 825, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 31.74 GiB of which 33.62 MiB is free. Including non-PyTorch memory, this process has 31.70 GiB memory in use. Of the allocated memory 28.65 GiB is allocated by PyTorch, and 2.65 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
