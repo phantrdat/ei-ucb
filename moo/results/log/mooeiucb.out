@@ -1,0 +1,113 @@
+Running Bayesian Optimization for Penicillin with 7 dimensions and 3 objectives
+Running EHVI
+Run 1
+Penicillin EHVI 1
+Run 2
+Penicillin EHVI 2
+Run 3
+Penicillin EHVI 3
+Run 4
+Penicillin EHVI 4
+Run 5
+Penicillin EHVI 5
+Run 6
+Penicillin EHVI 6
+Run 7
+Penicillin EHVI 7
+Run 8
+Penicillin EHVI 8
+Run 9
+Penicillin EHVI 9
+Run 10
+Penicillin EHVI 10
+Running qEHVI
+Run 1
+Penicillin qEHVI 1
+Run 2
+Penicillin qEHVI 2
+Run 3
+Penicillin qEHVI 3
+Run 4
+Penicillin qEHVI 4
+Run 5
+Penicillin qEHVI 5
+Run 6
+Penicillin qEHVI 6
+Run 7
+Penicillin qEHVI 7
+Run 8
+Penicillin qEHVI 8
+Run 9
+Penicillin qEHVI 9
+Run 10
+Penicillin qEHVI 10
+Running qLogEHVI
+Run 1
+Penicillin qLogEHVI 1
+Run 2
+Penicillin qLogEHVI 2
+Run 3
+Penicillin qLogEHVI 3
+Run 4
+Penicillin qLogEHVI 4
+Run 5
+Penicillin qLogEHVI 5
+Run 6
+Penicillin qLogEHVI 6
+Run 7
+Penicillin qLogEHVI 7
+Run 8
+Penicillin qLogEHVI 8
+Run 9
+Penicillin qLogEHVI 9
+Run 10
+Penicillin qLogEHVI 10
+Running EHVI-Custom with beta=1
+Run 1
+Penicillin EHVI-Custom 1
+Run 2
+Penicillin EHVI-Custom 2
+Run 3
+Penicillin EHVI-Custom 3
+Run 4
+Penicillin EHVI-Custom 4
+Run 5
+Penicillin EHVI-Custom 5
+Run 6
+Penicillin EHVI-Custom 6
+Run 7
+Penicillin EHVI-Custom 7
+Run 8
+Penicillin EHVI-Custom 8
+Run 9
+Penicillin EHVI-Custom 9
+Run 10
+Penicillin EHVI-Custom 10
+Running EHVI-Custom with beta=5
+Run 1
+Penicillin EHVI-Custom 1
+Run 2
+Penicillin EHVI-Custom 2
+Run 3
+Penicillin EHVI-Custom 3
+Run 4
+Penicillin EHVI-Custom 4
+Run 5
+Penicillin EHVI-Custom 5
+Run 6
+Penicillin EHVI-Custom 6
+Run 7
+Penicillin EHVI-Custom 7
+Run 8
+Penicillin EHVI-Custom 8
+Run 9
+Penicillin EHVI-Custom 9
+Run 10
+Penicillin EHVI-Custom 10
+Running EHVI-Custom with beta=10
+Run 1
+Penicillin EHVI-Custom 1
+Run 2
+Penicillin EHVI-Custom 2
+Run 3
+Penicillin EHVI-Custom 3

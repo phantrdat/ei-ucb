@@ -162,9 +162,8 @@ class CustomEHVI(qNoisyExpectedHypervolumeImprovement):
         sampled_hvi = self._compute_sampled_hvi(samples=samples, X=X)
         ehvi = sampled_hvi.mean(dim=0)
         varhvi = sampled_hvi.var(dim=0)
-        # print(f"ehvi: {ehvi}, varhvi: {varhvi}")
         # compute the expected improvement
-        return ehvi + self.beta * varhvi.sqrt()
+        return ehvi + self.beta.sqrt() * varhvi.sqrt()
     
     @concatenate_pending_points
     @t_batch_mode_transform()
