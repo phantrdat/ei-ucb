@@ -6,7 +6,7 @@ import io
 import os
 import glob
 # Parameters
-pdf_files = glob.glob('/home/pdat/EI-UCB/best_results/*')  # Replace with your actual file names
+pdf_files = glob.glob('/home/pdat/EI-UCB/sbo/best_results/*')  # Replace with your actual file names
 
 # Convert PDFs to images
 images = []
