@@ -139,7 +139,7 @@ def bayesian_optimization(acq_type, runs=10):
                 bounds=bounds, 
                 q=1, 
                 num_restarts=10, 
-                raw_samples=512,
+                raw_samples=512, 
                 options={
                     "batch_limit": 5,
                     "maxiter": 100
@@ -155,9 +155,7 @@ def bayesian_optimization(acq_type, runs=10):
             bd = DominatedPartitioning(ref_point=ref_point, Y=train_Y)
             volume = bd.compute_hypervolume().item()
             best_values.append(volume)
-            # print(f"Iteration {i+1}: Best Y = {train_Y.min().item():.4f}")
         best_values_runs.append(best_values)
-    print(best_values_runs)
     return np.array(best_values_runs)
 
 def run_bayesian_optimization(acq_type):

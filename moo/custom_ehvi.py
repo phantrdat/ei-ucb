@@ -160,11 +160,17 @@ class CustomEHVI(qNoisyExpectedHypervolumeImprovement):
         """
         # compute the sampled ehvi
         sampled_hvi = self._compute_sampled_hvi(samples=samples, X=X)
+        # add some noise to sampled_hvi
+        sampled_hvi += torch.randn_like(sampled_hvi)*1e-6
         ehvi = sampled_hvi.mean(dim=0)
-        varhvi = sampled_hvi.var(dim=0)
+        # # first
+        # varhvi = sampled_hvi.var(dim=0)
+        # second
+        ehvi_squared = (sampled_hvi**2).mean(dim=0)
+        varhvi = ehvi_squared - ehvi**2
         # compute the expected improvement
         return ehvi + self.beta.sqrt() * varhvi.sqrt()
-    
+              
     @concatenate_pending_points
     @t_batch_mode_transform()
     def forward(self, X: Tensor) -> Tensor:
