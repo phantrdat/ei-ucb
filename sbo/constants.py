@@ -1,32 +1,33 @@
 from botorch.test_functions import *
 from test_functions.test_functions import *
 # from test_functions.lunar_lander import LunarLander
-FIG_DIR = "figures" 
-NUMERICAL_RESULTS_DIR= "numerical_results" 
-EXP_RUNS  = 30  # Number of runs per acquisition function
+FIG_DIR = "res_figures" 
+NUMERICAL_RESULTS_DIR= "/home/pdat/EI-UCB/sbo/numerical_results" 
+EXP_RUNS  = 10  # Number of runs per acquisition function
 OBJECTIVE_FUNCTIONS = [
-    Ackley,
+    # Ackley,
     # Beale,
-    # Branin,
+    Branin,
     # Bukin,
-    DixonPrice,
+        DixonPrice,
     # DropWave,
     # EggHolder,
-    Griewank,
-    Alpine1,
+        Griewank,
+        Alpine1,
     # Hartmann,
     # HolderTable,
-    Levy,
+        Levy,
     # Michalewicz,
-    Powell,
-    Rastrigin,
-    Rosenbrock,
+        Powell,
+        Rastrigin,
+        Rosenbrock,
     # Shekel,
     # SixHumpCamel,
-    StyblinskiTang
+        StyblinskiTang
     ]
 DIMS = {
-    Ackley: 20,
+    Branin: 2,
+    Ackley: 50,
     Alpine1: 15,
     DixonPrice: 15,
     Griewank:9,
@@ -36,3 +37,15 @@ DIMS = {
     Rosenbrock: 24,
     StyblinskiTang: 21
 }
+
+# DIMS = {
+#     Ackley: 200,
+#     Alpine1: 200,
+#     DixonPrice: 200,
+#     Griewank: 200,
+#     Levy: 200,
+#     Powell: 200,
+#     Rastrigin: 200,
+#     Rosenbrock: 200,
+#     StyblinskiTang: 200
+# }

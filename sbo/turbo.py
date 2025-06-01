@@ -3,8 +3,8 @@ import math
 import warnings
 import numpy as np
 from dataclasses import dataclass
-
 import torch
+from botorch.test_functions import *
 from botorch.acquisition import qExpectedImprovement
 from botorch.exceptions import BadInitialCandidatesWarning
 from botorch.fit import fit_gpytorch_mll
@@ -14,31 +14,30 @@ from botorch.optim import optimize_acqf
 from botorch.test_functions import Ackley
 from botorch.utils.transforms import unnormalize
 from torch.quasirandom import SobolEngine
-
+from custom_ei import CustomExpectedImprovement
 import gpytorch
 from gpytorch.constraints import Interval
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
-from constants import OBJECTIVE_FUNCTIONS, DIMS
-
-
+from constants import OBJECTIVE_FUNCTIONS, DIMS, NUMERICAL_RESULTS_DIR, EXP_RUNS
+from tqdm import tqdm
 # ==================== Configuration ====================
 warnings.filterwarnings("ignore", category=BadInitialCandidatesWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.double
 SMOKE_TEST = os.environ.get("SMOKE_TEST")
 
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 N_CANDIDATES = None
 NUM_RESTARTS = 10 if not SMOKE_TEST else 2
 RAW_SAMPLES = 512 if not SMOKE_TEST else 4
 MAX_CHOLESKY_SIZE = float("inf")
 
-SAVE_DIR = "turbo_logs"
-os.makedirs(SAVE_DIR, exist_ok=True)
+
 
 
 
@@ -94,7 +93,7 @@ def update_state(state: TurboState, Y_next: torch.Tensor) -> TurboState:
 
 
 def generate_batch(state, model, X, Y, batch_size, n_candidates, acqf="ts"):
-    assert acqf in ("ts", "ei")
+    assert acqf in ("ts", "ei", "custom_ei"), "Invalid acquisition function specified."
     dim = X.shape[-1]
     x_center = X[Y.argmax(), :].clone()
 
@@ -118,7 +117,7 @@ def generate_batch(state, model, X, Y, batch_size, n_candidates, acqf="ts"):
         with torch.no_grad():
             X_next = thompson_sampling(X_cand, num_samples=batch_size)
 
-    else:
+    elif acqf == "ei":
         ei = qExpectedImprovement(model, Y.max())
         X_next, _ = optimize_acqf(
             ei,
@@ -127,13 +126,22 @@ def generate_batch(state, model, X, Y, batch_size, n_candidates, acqf="ts"):
             num_restarts=NUM_RESTARTS,
             raw_samples=RAW_SAMPLES,
         )
-
+    elif acqf == "custom_ei":
+        ei_custom = CustomExpectedImprovement(model, Y.max(), beta=1.0)
+        X_next, _ = optimize_acqf(
+            ei_custom,
+            bounds=torch.stack([tr_lb, tr_ub]),
+            q=batch_size,
+            num_restarts=NUM_RESTARTS,
+            raw_samples=RAW_SAMPLES,
+        )
     return X_next
 
 
 # ==================== Main TuRBO Loop ====================
-def run_turbo(acqf="ts"):
-    for f in OBJECTIVE_FUNCTIONS:
+def run_turbo(f: SyntheticTestFunction, acqf: str = "ts"):
+    
+    
         # --- Set up dimension and objective function ---
         if hasattr(f, "dim"):
             DIM = f.dim
@@ -145,45 +153,85 @@ def run_turbo(acqf="ts"):
             DIM = DIMS[f]
             objective_func = f(dim=DIM, negate=True).to(dtype=dtype, device=device)
         BOUNDS = objective_func.bounds
-        print(f"Running TuRBO on {f.__name__} with dim={DIM}")
+        print(f"Running TuRBO on {f.__name__} with dim={DIM} and acquisition function {acqf}")
 
-        N_INIT = 2 * DIM
+        N_INIT = DIM + 1 
         N_CANDIDATES = min(5000, max(2000, 200 * DIM)) if not SMOKE_TEST else 4
+        N_ITERATIONS = 100 if DIM <= 10 else 500
+        
 
-        X = get_initial_points(DIM, N_INIT)
-        Y = torch.tensor([eval_objective(objective_func, x, bounds=BOUNDS) for x in X], dtype=dtype, device=device).unsqueeze(-1)
+        # torch.manual_seed(0)
+        # check if save file exists
+        func_name = objective_func.__class__.__name__
+            
+        save_path = f"{NUMERICAL_RESULTS_DIR}/{func_name}_{DIM}"
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+        results_path = f"{save_path}/{func_name}_{DIM}_best_values_turbo-{acqf}.npy"
+        
+        if os.path.exists(results_path):
+            # print(f"Results already exist for {func_name} with dim={DIM} and acquisition function {acqf}. Loading...")
+            best_values_runs = np.load(results_path)
+            if best_values_runs.shape[0] >= EXP_RUNS:
+                print(f"Skipping {func_name} with dim={DIM} and acquisition function {acqf} as results already exist.")
+                return best_values_runs
+            else:  
+                best_values_runs = best_values_runs.tolist()
+        else:
+            best_values_runs = []
+        n_done = len(best_values_runs)
+        for run in range(n_done, EXP_RUNS):
+            X = get_initial_points(DIM, N_INIT)
+            Y = torch.tensor([eval_objective(objective_func, x, bounds=BOUNDS) for x in X], dtype=dtype, device=device).unsqueeze(-1)
 
-        state = TurboState(dim=DIM, batch_size=BATCH_SIZE, best_value=Y.max().item())
-        best_values = [state.best_value]
+            state = TurboState(dim=DIM, batch_size=BATCH_SIZE, best_value=Y.max().item())
+            best_values_turbo = [-state.best_value]
+            print(objective_func.__class__.__name__, "TURBO", run)
+            with tqdm(total=N_ITERATIONS, desc=f"Running TuRBO on {f.__name__} with dim={DIM} and acquisition function {acqf}") as pbar:
+                
+                for it in range(N_ITERATIONS):
+                    train_Y = (Y - Y.mean()) / Y.std()
 
-        torch.manual_seed(0)
+                    likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-3))
+                    covar_module = ScaleKernel(
+                        MaternKernel(nu=2.5, ard_num_dims=DIM, lengthscale_constraint=Interval(0.005, 4.0))
+                    )
+                    model = SingleTaskGP(X, train_Y, covar_module=covar_module, likelihood=likelihood)
+                    mll = ExactMarginalLogLikelihood(model.likelihood, model)
 
-        while not state.restart_triggered:
-            train_Y = (Y - Y.mean()) / Y.std()
+                    with gpytorch.settings.max_cholesky_size(MAX_CHOLESKY_SIZE):
+                        fit_gpytorch_mll(mll)
+                        X_next = generate_batch(state, model, X, train_Y, BATCH_SIZE, N_CANDIDATES, acqf=acqf)
 
-            likelihood = GaussianLikelihood(noise_constraint=Interval(1e-8, 1e-3))
-            covar_module = ScaleKernel(
-                MaternKernel(nu=2.5, ard_num_dims=DIM, lengthscale_constraint=Interval(0.005, 4.0))
-            )
-            model = SingleTaskGP(X, train_Y, covar_module=covar_module, likelihood=likelihood)
-            mll = ExactMarginalLogLikelihood(model.likelihood, model)
+                    Y_next = torch.tensor([eval_objective(objective_func, x, BOUNDS) for x in X_next], dtype=dtype, device=device).unsqueeze(-1)
 
-            with gpytorch.settings.max_cholesky_size(MAX_CHOLESKY_SIZE):
-                fit_gpytorch_mll(mll)
-                X_next = generate_batch(state, model, X, train_Y, BATCH_SIZE, N_CANDIDATES, acqf=acqf)
+                    state = update_state(state, Y_next)
+                    best_values_turbo.append(-state.best_value)
 
-            Y_next = torch.tensor([eval_objective(objective_func, x, BOUNDS) for x in X_next], dtype=dtype, device=device).unsqueeze(-1)
-
-            state = update_state(state, Y_next)
-            best_values.append(state.best_value)
-
-            X = torch.cat((X, X_next), dim=0)
-            Y = torch.cat((Y, Y_next), dim=0)
-
-            print(f"{len(X):>4}) Best value: {state.best_value:.3e}, TR length: {state.length:.3e}")
-
-        np.save(os.path.join(SAVE_DIR, f"turbo_best_values_{acqf}.npy"), np.array(best_values))
+                    X = torch.cat((X, X_next), dim=0)
+                    Y = torch.cat((Y, Y_next), dim=0)
+                    pbar.set_description(f"Run {run+1}/{EXP_RUNS}, Iteration {it+1}/{N_ITERATIONS}, Best Value: {-state.best_value:.3e}, TR Length: {state.length:.3e}")
+                    pbar.update(1)                
+            # print(f"{len(X):>4}) Best value: {state.best_value:.3e}, TR length: {state.length:.3e}")
+            
+            best_values_runs.append(best_values_turbo.copy())
+        
+            # best_values_runs = np.array(best_values_runs)
+            
+            # if not os.path.exists(f"{NUMERICAL_RESULTS_DIR}/{func_name}"):
+            #     os.makedirs(f"{NUMERICAL_RESULTS_DIR}/{func_name}")
+            
+            np.save(save_path, np.array(best_values_runs))   
+        
 
 
 if __name__ == "__main__":
-    run_turbo(acqf="ts")
+    for f in OBJECTIVE_FUNCTIONS:
+        run_turbo(f, "ts")
+        run_turbo(f, "custom_ei")
+        run_turbo(f, "ei")
+        # func_name = objective_func.__class__.__name__
+            # if not os.path.exists(f"{NUMERICAL_RESULTS_DIR}/{func_name}"):
+            #     os.makedirs(f"{NUMERICAL_RESULTS_DIR}/{func_name}")
+
+        # np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_ei.npy", best_values_turbo)

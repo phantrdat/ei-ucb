@@ -5,6 +5,7 @@ from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition.analytic import ExpectedImprovement, LogExpectedImprovement 
 from botorch.acquisition.logei import qLogExpectedImprovement
+from gpytorch.kernels import MaternKernel, ScaleKernel, RBFKernel
 from test_functions import *
 from custom_ei import CustomExpectedImprovement
 from constants import *
@@ -18,6 +19,7 @@ from botorch.sampling import SobolQMCNormalSampler
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.double  # Use double precision for GP models
 import numpy as np
+from typing import Optional
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -25,10 +27,12 @@ warnings.filterwarnings("ignore")
 # Define list function tests
 
 
+def single_objective_bayesian_optimization(
+        acq_type: str, 
+        f: SyntheticTestFunction, 
+        beta: Optional[float] = None,
+        maximize_mode: bool=False) -> np.ndarray:
 
-
-BETA=20
-for f in OBJECTIVE_FUNCTIONS:
     dim = 0
     if hasattr(f, "dim"):
         dim = f.dim
@@ -40,126 +44,103 @@ for f in OBJECTIVE_FUNCTIONS:
         # dim = np.random.randint(low=7, high=25)         
         dim = DIMS[f]
         objective_func = f(dim=dim).to(dtype=dtype, device=device)
+    # Create directory for numerical results if it doesn't exist
+    func_name = objective_func.__class__.__name__ 
+    save_path = f"{NUMERICAL_RESULTS_DIR}/{func_name}_{dim}"   
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    results_path = f"{save_path}/{func_name}_{dim}_best_values_{acq_type.lower()}.npy" if beta is None else f"{save_path}/{func_name}_{dim}_best_values_ei_custom_beta={beta}.npy"
+    # Define bounds for the optimization
     
-    bounds = torch.tensor(objective_func.bounds, dtype=dtype, device=device)  # Search space bounds
     # Experiment settings
-    
+    bounds = torch.tensor(objective_func.bounds, dtype=dtype, device=device)  # Search space bounds
     num_initial_points = dim + 1
     num_iterations = 100 if dim <= 10 else 200
     # Generate initial training data
     sobol = SobolEngine(dimension=dim, scramble=True, seed=0)
     fixed_train_X  = bounds[0] + (bounds[1] - bounds[0]) * sobol.draw(num_initial_points).to(dtype=dtype, device=device)
     fixed_train_Y  = objective_func(fixed_train_X).unsqueeze(-1) # Evaluate function and reshape
-    def bayesian_optimization(acq_type, maximize_mode=False):
+
+    if os.path.exists(results_path):
+        # print(f"Results already exist for {func_name} with dim={DIM} and acquisition function {acqf}. Loading...")
+        best_values_runs = np.load(results_path)
+        if best_values_runs.shape[0] >= EXP_RUNS:
+            print(f"Skipping {func_name} with dim={dim} and acquisition function {acq_type} as results already exist.")
+            return best_values_runs
+        else:  
+            best_values_runs = best_values_runs.tolist()
+    else:
         best_values_runs = []
-        for run in range(EXP_RUNS):
-            print(objective_func.__class__.__name__, acq_type, run)
-            train_X = fixed_train_X.clone()
-            train_Y = fixed_train_Y.clone()
-            # Track best observed function values
-            if maximize_mode:
-                train_Y = -train_Y  # Flip for maximization
+    n_done = len(best_values_runs)
+    for run in range(n_done, EXP_RUNS):
+        print(objective_func.__class__.__name__, acq_type, run)
+        train_X = fixed_train_X.clone()
+        train_Y = fixed_train_Y.clone()
+        # Track best observed function values
+        if maximize_mode:
+            train_Y = -train_Y  # Flip for maximization
+
+        best_values = [train_Y.max().item() if maximize_mode else train_Y.min().item()]
         
-            best_values = [train_Y.max().item() if maximize_mode else train_Y.min().item()]
-            
-            gp = SingleTaskGP(train_X, train_Y, outcome_transform=Standardize(m=1))
-            mll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        for i in range(num_iterations):
+            gp_model = SingleTaskGP(train_X, train_Y, covar_module=ScaleKernel(RBFKernel()), outcome_transform=Standardize(m=1))
+            mll = ExactMarginalLogLikelihood(gp_model.likelihood, gp_model)
             fit_gpytorch_mll(mll)
-            for i in range(num_iterations):
-                if acq_type == "EI":
-                    acq_func = ExpectedImprovement(model=gp, best_f=train_Y.min(), maximize=False)
-                elif acq_type == "LogEI":
-                    acq_func = LogExpectedImprovement(model=gp, best_f=train_Y.min(), maximize=False)
-                elif acq_type == "EI-Custom":
-                    # beta = 10  # Exploration parameter for EI Custom
-                    acq_func = CustomExpectedImprovement(model=gp, best_f=train_Y.min(), beta=BETA, maximize=False)
-                elif acq_type == "qLogEI":
-                    sampler = SobolQMCNormalSampler(torch.Size([1024]))
-                    acq_func = qLogExpectedImprovement(model=gp, best_f=train_Y.max(), sampler=sampler)  
-                else:
-                    raise ValueError("Invalid acquisition function type")
-                # Optimize the acquisition function to find the next query point
-                candidate, _ = optimize_acqf(
-                    acq_func, bounds=bounds, q=1, num_restarts=10, raw_samples=100
-                )
-                # Evaluate the function at the new point
-                new_Y = objective_func(candidate).unsqueeze(-1)
-                if maximize_mode:
-                    new_Y = -new_Y  # flip sign
-                # Update the dataset
-                train_X = torch.cat([train_X, candidate])
-                train_Y = torch.cat([train_Y, new_Y])
-                # Store best observed value
-           
-                best_values.append(train_Y.max().item() if maximize_mode else train_Y.min().item())
-                
-            best_values_runs.append(best_values)
-        return np.array(best_values_runs)
-    
-        
-    # Call EI 
-    best_values_ei = bayesian_optimization("EI")
-    mean_ei = best_values_ei.mean(axis=0)
-    std_ei = best_values_ei.std(axis=0)
+            # gp_hyperparams = {
+            #     "lengthscale": gp_model.covar_module.base_kernel.lengthscale.detach().cpu().numpy(),
+            #     "outputscale": gp_model.covar_module.outputscale.detach().cpu().numpy(),
+            #     "noise": gp_model.likelihood.noise.detach().cpu().numpy()
+            # }
+            # print(gp_hyperparams)
+            if acq_type.lower() == "ei":
+                acq_func = ExpectedImprovement(model=gp_model, best_f=train_Y.min(), maximize=False)
+            elif acq_type.lower() == "logei":
+                acq_func = LogExpectedImprovement(model=gp_model, best_f=train_Y.min(), maximize=False)
+            elif acq_type.lower() == "ei-custom":
+                # beta = 10  # Exploration parameter for EI Custom
+                beta_value = beta if beta is not None else 1.0  # Provide a default float value
+                acq_func = CustomExpectedImprovement(model=gp_model, best_f=train_Y.min(), beta=beta_value, maximize=False)
+            elif acq_type.lower() == "qlogei":
+                sampler = SobolQMCNormalSampler(torch.Size([1024]))
+                acq_func = qLogExpectedImprovement(model=gp_model, best_f=train_Y.max(), sampler=sampler)  
+            else:
+                raise ValueError("Invalid acquisition function type")
+            # Optimize the acquisition function to find the next query point
+            candidate, _ = optimize_acqf(
+                acq_func, bounds=bounds, q=1, num_restarts=10, raw_samples=100
+            )
+            # Evaluate the function at the new point
+            new_Y = objective_func(candidate).unsqueeze(-1)
+            if maximize_mode:
+                new_Y = -new_Y  # flip sign
+            # Update the dataset
+            train_X = torch.cat([train_X, candidate])
+            train_Y = torch.cat([train_Y, new_Y])
+            # Store best observed value
+       
+            best_values.append(train_Y.max().item() if maximize_mode else train_Y.min().item())
+            
+        best_values_runs.append(best_values) if acq_type.lower() != "qlogei" else best_values_runs.append(-np.array(best_values))
+        np.save(results_path, np.array(best_values_runs))
+          
+    return np.array(best_values_runs)
+def main():  
+    for f in OBJECTIVE_FUNCTIONS: 
+        # Call EI 
+        single_objective_bayesian_optimization("EI", f)
+        # Call LogEI 
+        single_objective_bayesian_optimization("LogEI", f)
 
-    # Call LogEI 
-    best_values_logei = bayesian_optimization("LogEI")
-    mean_logei = best_values_logei.mean(axis=0)
-    std_logei = best_values_logei.std(axis=0)
 
-    # Call qLogEI 
-    best_values_qlogei = bayesian_optimization("qLogEI", maximize_mode=True)
-    best_values_qlogei = -best_values_qlogei  # Flip back to match EI/LogEI results
-    mean_qlogei = best_values_qlogei.mean(axis=0)
-    std_qlogei = best_values_qlogei.std(axis=0)
-    
-    func_name = objective_func.__class__.__name__
-    # Save to .npy files
-    if not os.path.exists(f"{NUMERICAL_RESULTS_DIR}/{func_name}"):
-        os.makedirs(f"{NUMERICAL_RESULTS_DIR}/{func_name}")
+        # Call qLogEI 
+        best_values_qlogei = single_objective_bayesian_optimization("qLogEI", f, maximize_mode=True)
+        best_values_qlogei = -best_values_qlogei  # Flip back to match EI/LogEI results
 
-    np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_ei.npy", best_values_ei)
-    np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_logei.npy", best_values_logei)
-    np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_qlogei.npy", best_values_qlogei)
-    
+        # Call EI-Custom
+        for beta in [1,5,10,15, 20, 25, 30, 35, 40]:            
+            single_objective_bayesian_optimization("EI-Custom", f, beta=beta)
 
-    # Call EI-Custom
-    for beta in [1,5,10,15, 20, 25, 30, 35, 40]:
-        BETA = beta
-        
-        best_values_ei_custom = bayesian_optimization("EI-Custom")
-        #Save to .npy files
-        np.save(f"{NUMERICAL_RESULTS_DIR}/{func_name}/{func_name}_best_values_ei_custom_beta={BETA}.npy", best_values_ei_custom)
-        # Compute mean and standard deviation
-        
-        mean_ei_custom = best_values_ei_custom.mean(axis=0)
-        std_ei_custom = best_values_ei_custom.std(axis=0)
-        
-        
-        # Plot results
-        iterations = np.arange(len(mean_ei_custom))
-        plt.figure(figsize=(8, 5))
-        
-        plt.plot(iterations, mean_ei, marker="o", linestyle="-", color="b", label="EI")
-        plt.fill_between(iterations, mean_ei - std_ei, mean_ei + std_ei, color="b", alpha=0.2)
-        
-        plt.plot(iterations, mean_logei, marker="x", linestyle="-", color="g", label="LogEI")  # Fixed variable
-        plt.fill_between(iterations, mean_logei - std_logei, mean_logei + std_logei, color="g", alpha=0.2)  # Fixed color
-        
-        plt.plot(iterations, mean_qlogei, marker="d", linestyle="-", color="purple", label="qLogEI")
-        plt.fill_between(iterations, mean_qlogei - std_qlogei, mean_qlogei + std_qlogei, color="purple", alpha=0.2)    
 
-        plt.plot(iterations, mean_ei_custom, marker="s", linestyle="-", color="r", label=f"EI Custom, Beta={BETA}")
-        plt.fill_between(iterations, mean_ei_custom - std_ei_custom, mean_ei_custom + std_ei_custom, color="r", alpha=0.2)
-        
-        plt.xlabel("Iteration")
-        plt.ylabel("Best Function Value Found")
-        # Extract function name dynamically
-        
-        plt.title(f"BO with EI vs. EI-Custom on {func_name}-{dim}D")
-        plt.legend()
-        plt.grid(True)
-        if os.path.isdir(f"{FIG_DIR}/{func_name}") == False:
-            os.makedirs(f"{FIG_DIR}/{func_name}")
-        plt.savefig(f"{FIG_DIR}/{func_name}/{func_name}-{dim}-beta={BETA}.pdf", dpi=300)  # Save plot as PDF
-        
+if __name__ == "__main__":
+    main()
+    print("All experiments completed.")
